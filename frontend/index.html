@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#05050c">
+<title>HEXGATE // CYBERPUNK GATE</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<div class="scanlines"></div>
+<div class="grid"></div>
+
+<header>
+  <a class="logo" href="/">HEX<span>GATE</span><i>_</i></a>
+  <div class="status"><b></b> SYSTEM ONLINE</div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="eyebrow">[ WHATSAPP // NEURAL LINK ]</div>
+    <h1>ENTER THE<br><span>HEXGATE</span></h1>
+    <p>Connectez votre WhatsApp à votre bot. Pairing Code, contrôle et automatisation dans une interface cyberpunk.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-top"><span>HEXGATE://PAIRING</span><span>v2.0</span></div>
+    <form id="pairForm">
+      <label>PHONE NUMBER</label>
+      <div class="input-wrap"><span>+</span><input id="phone" placeholder="2438XXXXXXXX" inputmode="numeric" required></div>
+      <button id="submitBtn" type="submit"><span>INITIALIZE LINK</span><b>↯</b></button>
+    </form>
+
+    <div id="loading" class="loading hidden">
+      <div class="loader"></div>
+      <span>ESTABLISHING NEURAL LINK...</span>
+    </div>
+
+    <div id="result" class="result hidden">
+      <small>PAIRING CODE</small>
+      <strong id="code">----</strong>
+      <p id="message"></p>
+      <div class="steps">
+        <span>01</span> WhatsApp → Appareils connectés<br>
+        <span>02</span> Connecter un appareil<br>
+        <span>03</span> Connecter avec un numéro de téléphone<br>
+        <span>04</span> Saisissez le code
+      </div>
+    </div>
+    <div id="error" class="error hidden"></div>
+  </section>
+
+  <section class="cards">
+    <article><div>01</div><h3>PAIRING</h3><p>Connexion par code depuis votre navigateur.</p></article>
+    <article><div>02</div><h3>ANTI-DELETE</h3><p>Restauration des contenus reçus puis supprimés.</p></article>
+    <article><div>03</div><h3>MODERATION</h3><p>Anti-link, anti-spam et outils admin.</p></article>
+  </section>
+</main>
+
+<footer>HEXGATE // CYBERPUNK WHATSAPP AUTOMATION</footer>
+<script src="/js/pairing.js"></script>
+</body>
+</html>
