@@ -1,31 +1,100 @@
+"use strict";
+
+/*
+ * ============================================================
+ * HEXGATE - WhatsApp Session Manager
+ * ============================================================
+ *
+ * Fichier :
+ * backend/src/baileys/sessionManager.js
+ *
+ * Fonctions :
+ * - Pairing Code WhatsApp
+ * - Sessions persistantes
+ * - Reconnexion automatique
+ * - Anti-link
+ * - Anti-spam basique
+ * - Fake recording
+ * - Anti-delete texte / image / vidéo / audio / document
+ * - .menu
+ * - .fakerecording
+ * - .antidelete
+ * - .antilink
+ * - .antispam
+ * - .welcome
+ * - .tagall
+ * - .groupinfo
+ * - .admins
+ * - .ping
+ * - .botstatus
+ *
+ * ============================================================
+ */
+
 const fs = require("fs");
 const path = require("path");
 const P = require("pino");
-const { Boom } = require("@hapi/boom");
 
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  downloadMediaMessage,
-  Browsers
+  Browsers,
+  downloadMediaMessage
 } = require("@whiskeysockets/baileys");
 
-const {
-  remember,
-  find,
-  MEDIA_DIR
-} = require("./store");
+/* ============================================================
+   DIRECTORIES
+============================================================ */
 
-const BASE = path.resolve(
-  process.env.SESSION_DIR || "./data/sessions"
+const ROOT_DIR = path.resolve(
+  process.env.HEXGATE_DATA_DIR || "./data"
 );
 
-fs.mkdirSync(BASE, { recursive: true });
-fs.mkdirSync(MEDIA_DIR, { recursive: true });
+const SESSION_DIR = path.join(
+  ROOT_DIR,
+  "sessions"
+);
+
+const MEDIA_DIR = path.join(
+  ROOT_DIR,
+  "media"
+);
+
+const MESSAGE_DB = path.join(
+  ROOT_DIR,
+  "messages.json"
+);
+
+fs.mkdirSync(
+  SESSION_DIR,
+  { recursive: true }
+);
+
+fs.mkdirSync(
+  MEDIA_DIR,
+  { recursive: true }
+);
+
+/* ============================================================
+   LOGGER
+============================================================ */
+
+const logger = P({
+  level:
+    process.env.LOG_LEVEL || "info"
+});
+
+/* ============================================================
+   MEMORY
+============================================================ */
 
 const sessions = new Map();
-const configs = new Map();
+const startingSessions = new Map();
+
+/* ============================================================
+   DEFAULT CONFIG
+============================================================ */
 
 const DEFAULT_CONFIG = {
   fakeRecording: false,
@@ -35,14 +104,75 @@ const DEFAULT_CONFIG = {
   welcome: true
 };
 
-/* =========================================================
-   PHONE
-========================================================= */
+const configs = new Map();
+
+/* ============================================================
+   MESSAGE DATABASE
+============================================================ */
+
+let messageDatabase = {};
+
+try {
+  if (fs.existsSync(MESSAGE_DB)) {
+    const raw =
+      fs.readFileSync(
+        MESSAGE_DB,
+        "utf8"
+      );
+
+    messageDatabase =
+      JSON.parse(raw || "{}");
+  }
+} catch (error) {
+  logger.warn(
+    {
+      error: error.message
+    },
+    "[HEXGATE] Impossible de charger messages.json"
+  );
+
+  messageDatabase = {};
+}
+
+/* ============================================================
+   SAVE DATABASE
+============================================================ */
+
+function saveMessageDatabase() {
+  try {
+    fs.writeFileSync(
+      MESSAGE_DB,
+      JSON.stringify(
+        messageDatabase,
+        null,
+        2
+      ),
+      "utf8"
+    );
+  } catch (error) {
+    logger.error(
+      {
+        error: error.message
+      },
+      "[HEXGATE] Erreur sauvegarde messages"
+    );
+  }
+}
+
+/* ============================================================
+   PHONE NORMALIZATION
+============================================================ */
 
 function normalizePhone(input) {
-  const phone = String(input || "").replace(/\D/g, "");
+  const phone =
+    String(input || "")
+      .replace(/\D/g, "");
 
-  if (!/^\d{8,15}$/.test(phone)) {
+  if (
+    !phone ||
+    phone.length < 8 ||
+    phone.length > 15
+  ) {
     throw new Error(
       "Numéro invalide. Utilisez le format international sans +. Exemple : 2438XXXXXXXX"
     );
@@ -51,48 +181,102 @@ function normalizePhone(input) {
   return phone;
 }
 
-/* =========================================================
+/* ============================================================
+   FORMAT PAIRING CODE
+============================================================ */
+
+function formatPairingCode(code) {
+  if (!code) {
+    return null;
+  }
+
+  const clean =
+    String(code)
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toUpperCase();
+
+  if (!clean) {
+    return null;
+  }
+
+  const parts =
+    clean.match(/.{1,4}/g);
+
+  return parts
+    ? parts.join("-")
+    : clean;
+}
+
+/* ============================================================
    CONFIG
-========================================================= */
+============================================================ */
 
 function getConfig(phone) {
   if (!configs.has(phone)) {
-    configs.set(phone, {
-      ...DEFAULT_CONFIG
-    });
+    configs.set(
+      phone,
+      {
+        ...DEFAULT_CONFIG
+      }
+    );
   }
 
   return configs.get(phone);
 }
 
-/* =========================================================
-   MESSAGE HELPERS
-========================================================= */
+/* ============================================================
+   MESSAGE UNWRAPPER
+============================================================ */
 
 function unwrapMessage(message) {
-  let m = message;
+  let current = message;
 
-  while (m?.ephemeralMessage?.message) {
-    m = m.ephemeralMessage.message;
+  if (!current) {
+    return {};
   }
 
-  while (m?.viewOnceMessage?.message) {
-    m = m.viewOnceMessage.message;
+  while (
+    current.ephemeralMessage &&
+    current.ephemeralMessage.message
+  ) {
+    current =
+      current.ephemeralMessage.message;
   }
 
-  while (m?.viewOnceMessageV2?.message) {
-    m = m.viewOnceMessageV2.message;
+  while (
+    current.viewOnceMessage &&
+    current.viewOnceMessage.message
+  ) {
+    current =
+      current.viewOnceMessage.message;
   }
 
-  while (m?.documentWithCaptionMessage?.message) {
-    m = m.documentWithCaptionMessage.message;
+  while (
+    current.viewOnceMessageV2 &&
+    current.viewOnceMessageV2.message
+  ) {
+    current =
+      current.viewOnceMessageV2.message;
   }
 
-  return m || {};
+  while (
+    current.viewOnceMessageV2Extension &&
+    current.viewOnceMessageV2Extension.message
+  ) {
+    current =
+      current.viewOnceMessageV2Extension.message;
+  }
+
+  return current || {};
 }
 
+/* ============================================================
+   EXTRACT TEXT
+============================================================ */
+
 function extractText(message) {
-  const m = unwrapMessage(message);
+  const m =
+    unwrapMessage(message);
 
   return (
     m.conversation ||
@@ -104,714 +288,1095 @@ function extractText(message) {
   ).trim();
 }
 
-function isLink(text) {
-  return /(
-    https?:\/\/|
-    www\.|
-    wa\.me\/|
-    chat\.whatsapp\.com\/|
-    t\.me\/|
-    telegram\.me\/
-  )/ix.test(text);
-}
+/* ============================================================
+   LINK DETECTION
+============================================================ */
 
-function isAdmin(metadata, jid) {
-  const participant = metadata?.participants?.find(
-    p => p.id === jid
-  );
+/*
+ * IMPORTANT :
+ * Pas de flag /x ici.
+ * JavaScript ne supporte pas le flag x.
+ */
 
-  return ["admin", "superadmin"].includes(
-    participant?.admin
+function containsLink(text) {
+  const value =
+    String(text || "");
+
+  return /https?:\/\/|www\.|wa\.me\/|chat\.whatsapp\.com\/|t\.me\/|telegram\.me\//i.test(
+    value
   );
 }
 
-/* =========================================================
-   CODE FORMAT
-========================================================= */
+/* ============================================================
+   GROUP ADMIN
+============================================================ */
 
-function formatCode(code) {
-  if (!code) return null;
-
-  const clean = String(code).replace(/[^A-Z0-9]/gi, "");
-
-  return clean.match(/.{1,4}/g)?.join("-") || clean;
-}
-
-/* =========================================================
-   SAVE RECEIVED MESSAGE
-========================================================= */
-
-async function saveReceivedMessage(phone, msg) {
+function isAdmin(
+  metadata,
+  jid
+) {
   if (
-    !msg?.message ||
-    !msg?.key?.id ||
-    !msg?.key?.remoteJid
+    !metadata ||
+    !jid
+  ) {
+    return false;
+  }
+
+  const participant =
+    metadata.participants?.find(
+      item =>
+        item.id === jid ||
+        item.jid === jid
+    );
+
+  if (!participant) {
+    return false;
+  }
+
+  return (
+    participant.admin === "admin" ||
+    participant.admin === "superadmin"
+  );
+}
+
+/* ============================================================
+   GET DISCONNECT CODE
+============================================================ */
+
+function getDisconnectCode(
+  lastDisconnect
+) {
+  return (
+    lastDisconnect?.error?.output?.statusCode ||
+    lastDisconnect?.error?.statusCode ||
+    null
+  );
+}
+
+/* ============================================================
+   MESSAGE DATABASE KEY
+============================================================ */
+
+function messageKey(
+  phone,
+  jid,
+  id
+) {
+  return `${phone}:${jid}:${id}`;
+}
+
+/* ============================================================
+   SAVE MESSAGE
+============================================================ */
+
+async function archiveMessage(
+  phone,
+  message
+) {
+  if (
+    !message ||
+    !message.key ||
+    !message.message
   ) {
     return;
   }
 
-  const m = unwrapMessage(msg.message);
+  const jid =
+    message.key.remoteJid;
 
-  const text = extractText(msg.message);
+  const id =
+    message.key.id;
+
+  if (!jid || !id) {
+    return;
+  }
+
+  const content =
+    unwrapMessage(
+      message.message
+    );
 
   let type = "text";
+  let text =
+    extractText(
+      message.message
+    );
+
   let mediaPath = null;
   let mimetype = null;
+  let fileName = null;
   let caption = null;
 
-  try {
-    if (m.imageMessage) {
-      type = "image";
-      mimetype =
-        m.imageMessage.mimetype ||
-        "image/jpeg";
+  /* ----------------------------------------------------------
+     IMAGE
+  ---------------------------------------------------------- */
 
-      caption =
-        m.imageMessage.caption ||
-        "";
-    }
+  if (
+    content.imageMessage
+  ) {
+    type = "image";
 
-    else if (m.videoMessage) {
-      type = "video";
-      mimetype =
-        m.videoMessage.mimetype ||
-        "video/mp4";
+    caption =
+      content.imageMessage.caption ||
+      "";
 
-      caption =
-        m.videoMessage.caption ||
-        "";
-    }
+    mimetype =
+      content.imageMessage.mimetype ||
+      "image/jpeg";
+  }
 
-    else if (m.audioMessage) {
-      type = "audio";
-      mimetype =
-        m.audioMessage.mimetype ||
-        "audio/ogg";
-    }
+  /* ----------------------------------------------------------
+     VIDEO
+  ---------------------------------------------------------- */
 
-    else if (m.documentMessage) {
-      type = "document";
-      mimetype =
-        m.documentMessage.mimetype ||
-        "application/octet-stream";
-    }
+  else if (
+    content.videoMessage
+  ) {
+    type = "video";
 
-    if (
-      ["image", "video", "audio", "document"]
-        .includes(type)
-    ) {
+    caption =
+      content.videoMessage.caption ||
+      "";
+
+    mimetype =
+      content.videoMessage.mimetype ||
+      "video/mp4";
+  }
+
+  /* ----------------------------------------------------------
+     AUDIO
+  ---------------------------------------------------------- */
+
+  else if (
+    content.audioMessage
+  ) {
+    type = "audio";
+
+    mimetype =
+      content.audioMessage.mimetype ||
+      "audio/ogg";
+  }
+
+  /* ----------------------------------------------------------
+     DOCUMENT
+  ---------------------------------------------------------- */
+
+  else if (
+    content.documentMessage
+  ) {
+    type = "document";
+
+    mimetype =
+      content.documentMessage.mimetype ||
+      "application/octet-stream";
+
+    fileName =
+      content.documentMessage.fileName ||
+      "HEXGATE-file";
+  }
+
+  /* ----------------------------------------------------------
+     DOWNLOAD MEDIA
+  ---------------------------------------------------------- */
+
+  if (
+    type !== "text"
+  ) {
+    try {
       const buffer =
         await downloadMediaMessage(
-          msg,
+          message,
           "buffer",
           {},
           {
-            logger: P({
-              level: "silent"
-            }),
-            reuploadRequest: async () => null
+            logger,
+            reuploadRequest:
+              async mediaMessage =>
+                undefined
           }
         );
 
-      const extension =
-        type === "image"
-          ? "jpg"
-          : type === "video"
-            ? "mp4"
-            : type === "audio"
-              ? "ogg"
-              : "bin";
+      if (
+        buffer &&
+        Buffer.isBuffer(buffer)
+      ) {
+        let extension =
+          "bin";
 
-      mediaPath = path.join(
-        MEDIA_DIR,
-        `${phone}-${Date.now()}-${msg.key.id}.${extension}`
-      );
+        if (
+          type === "image"
+        ) {
+          extension = "jpg";
+        }
 
-      fs.writeFileSync(
-        mediaPath,
-        buffer
+        if (
+          type === "video"
+        ) {
+          extension = "mp4";
+        }
+
+        if (
+          type === "audio"
+        ) {
+          extension = "ogg";
+        }
+
+        if (
+          type === "document"
+        ) {
+          extension = "bin";
+        }
+
+        const filename =
+          `${Date.now()}-${id}.${extension}`;
+
+        mediaPath =
+          path.join(
+            MEDIA_DIR,
+            filename
+          );
+
+        fs.writeFileSync(
+          mediaPath,
+          buffer
+        );
+      }
+    } catch (error) {
+      logger.warn(
+        {
+          error: error.message
+        },
+        "[HEXGATE] Téléchargement média impossible"
       );
     }
   }
 
-  catch (error) {
-    console.warn(
-      "[HEXGATE] Media archive error:",
-      error.message
+  const key =
+    messageKey(
+      phone,
+      jid,
+      id
     );
-  }
 
-  remember(phone, {
-    id: msg.key.id,
-    remoteJid: msg.key.remoteJid,
-    participant: msg.key.participant,
-    fromMe: msg.key.fromMe,
-    type,
-    text,
-    mediaPath,
-    mimetype,
-    caption
-  });
-}
-
-/* =========================================================
-   RESTORE DELETED MESSAGE
-========================================================= */
-
-async function restoreDeleted(
-  phone,
-  sock,
-  revokedMessage
-) {
-  const jid =
-    revokedMessage?.key?.remoteJid;
-
-  const id =
-    revokedMessage?.key?.id;
-
-  if (!jid || !id) return;
-
-  const saved = find(
+  messageDatabase[key] = {
     phone,
     jid,
-    id
+    id,
+
+    participant:
+      message.key.participant ||
+      null,
+
+    fromMe:
+      Boolean(
+        message.key.fromMe
+      ),
+
+    type,
+
+    text,
+
+    caption,
+
+    mimetype,
+
+    fileName,
+
+    mediaPath,
+
+    createdAt:
+      Date.now()
+  };
+
+  /*
+   * Évite une base infinie.
+   * On conserve les 1000 derniers messages.
+   */
+
+  const keys =
+    Object.keys(
+      messageDatabase
+    );
+
+  if (
+    keys.length > 1000
+  ) {
+    const sorted =
+      keys.sort(
+        (a, b) =>
+          (
+            messageDatabase[a]
+              ?.createdAt || 0
+          ) -
+          (
+            messageDatabase[b]
+              ?.createdAt || 0
+          )
+      );
+
+    const removeCount =
+      keys.length - 1000;
+
+    for (
+      let i = 0;
+      i < removeCount;
+      i++
+    ) {
+      delete messageDatabase[
+        sorted[i]
+      ];
+    }
+  }
+
+  saveMessageDatabase();
+}
+
+/* ============================================================
+   FIND ARCHIVED MESSAGE
+============================================================ */
+
+function findArchivedMessage(
+  phone,
+  jid,
+  id
+) {
+  return (
+    messageDatabase[
+      messageKey(
+        phone,
+        jid,
+        id
+      )
+    ] || null
   );
+}
+
+/* ============================================================
+   RESTORE DELETED MESSAGE
+============================================================ */
+
+async function restoreDeletedMessage(
+  phone,
+  sock,
+  key
+) {
+  if (
+    !key ||
+    !key.remoteJid ||
+    !key.id
+  ) {
+    return;
+  }
+
+  const saved =
+    findArchivedMessage(
+      phone,
+      key.remoteJid,
+      key.id
+    );
 
   if (!saved) {
-    console.log(
-      "[HEXGATE] Message supprimé introuvable:",
-      id
+    logger.info(
+      `[HEXGATE] Message supprimé non trouvé : ${key.id}`
     );
 
     return;
   }
 
+  const jid =
+    key.remoteJid;
+
   try {
-    let content;
+    /* --------------------------------------------------------
+       IMAGE
+    -------------------------------------------------------- */
 
     if (
       saved.type === "image" &&
       saved.mediaPath &&
-      fs.existsSync(saved.mediaPath)
+      fs.existsSync(
+        saved.mediaPath
+      )
     ) {
-      content = {
-        image: fs.readFileSync(
-          saved.mediaPath
-        ),
-        caption:
-          saved.caption || ""
-      };
+      await sock.sendMessage(
+        jid,
+        {
+          image:
+            fs.readFileSync(
+              saved.mediaPath
+            ),
+
+          caption:
+            `♻️ *MESSAGE SUPPRIMÉ RESTAURÉ*\n\n${saved.caption || ""}`
+        }
+      );
+
+      return;
     }
 
-    else if (
+    /* --------------------------------------------------------
+       VIDEO
+    -------------------------------------------------------- */
+
+    if (
       saved.type === "video" &&
       saved.mediaPath &&
-      fs.existsSync(saved.mediaPath)
+      fs.existsSync(
+        saved.mediaPath
+      )
     ) {
-      content = {
-        video: fs.readFileSync(
-          saved.mediaPath
-        ),
-        caption:
-          saved.caption || ""
-      };
+      await sock.sendMessage(
+        jid,
+        {
+          video:
+            fs.readFileSync(
+              saved.mediaPath
+            ),
+
+          caption:
+            `♻️ *MESSAGE SUPPRIMÉ RESTAURÉ*\n\n${saved.caption || ""}`
+        }
+      );
+
+      return;
     }
 
-    else if (
+    /* --------------------------------------------------------
+       AUDIO
+    -------------------------------------------------------- */
+
+    if (
       saved.type === "audio" &&
       saved.mediaPath &&
-      fs.existsSync(saved.mediaPath)
+      fs.existsSync(
+        saved.mediaPath
+      )
     ) {
-      content = {
-        audio: fs.readFileSync(
-          saved.mediaPath
-        ),
-        mimetype:
-          saved.mimetype ||
-          "audio/ogg",
-        ptt: false
-      };
+      await sock.sendMessage(
+        jid,
+        {
+          audio:
+            fs.readFileSync(
+              saved.mediaPath
+            ),
+
+          mimetype:
+            saved.mimetype ||
+            "audio/ogg",
+
+          ptt: false
+        }
+      );
+
+      return;
     }
 
-    else if (
+    /* --------------------------------------------------------
+       DOCUMENT
+    -------------------------------------------------------- */
+
+    if (
       saved.type === "document" &&
       saved.mediaPath &&
-      fs.existsSync(saved.mediaPath)
+      fs.existsSync(
+        saved.mediaPath
+      )
     ) {
-      content = {
-        document: fs.readFileSync(
-          saved.mediaPath
-        ),
-        mimetype:
-          saved.mimetype ||
-          "application/octet-stream",
-        fileName:
-          "HEXGATE-restored-file"
-      };
+      await sock.sendMessage(
+        jid,
+        {
+          document:
+            fs.readFileSync(
+              saved.mediaPath
+            ),
+
+          mimetype:
+            saved.mimetype ||
+            "application/octet-stream",
+
+          fileName:
+            saved.fileName ||
+            "restored-file"
+        }
+      );
+
+      return;
     }
 
-    else {
-      content = {
-        text:
-          saved.text ||
-          "[Message supprimé]"
-      };
-    }
+    /* --------------------------------------------------------
+       TEXT
+    -------------------------------------------------------- */
 
     await sock.sendMessage(
       jid,
       {
-        ...content,
-        contextInfo: {
-          externalAdReply: {
-            title:
-              "HEXGATE • Anti-Delete",
-            body:
-              "Contenu restauré après suppression",
-            mediaType: 1
-          }
-        }
+        text:
+          `♻️ *MESSAGE SUPPRIMÉ RESTAURÉ*\n\n${saved.text || "[contenu indisponible]"}`
       }
     );
 
-    console.log(
-      `[HEXGATE] Contenu restauré: ${id}`
-    );
-  }
-
-  catch (error) {
-    console.error(
-      "[HEXGATE] Restore error:",
-      error.message
+  } catch (error) {
+    logger.error(
+      {
+        error: error.message
+      },
+      "[HEXGATE] Erreur restauration message"
     );
   }
 }
 
-/* =========================================================
-   CREATE SESSION
-========================================================= */
+/* ============================================================
+   SEND COMMAND RESPONSE
+============================================================ */
 
-async function createSession(phoneInput) {
-  const phone =
-    normalizePhone(phoneInput);
-
-  /* -----------------------------------------
-     Session déjà active
-  ----------------------------------------- */
-
-  if (sessions.has(phone)) {
-    const existing =
-      sessions.get(phone);
-
-    return {
-      phone,
-      status:
-        existing.status,
-      code:
-        existing.code
-          ? formatCode(existing.code)
-          : null,
-      error:
-        existing.error || null
-    };
-  }
-
-  const authPath =
-    path.join(BASE, phone);
-
-  fs.mkdirSync(
-    authPath,
-    { recursive: true }
-  );
-
-  const {
-    state,
-    saveCreds
-  } =
-    await useMultiFileAuthState(
-      authPath
-    );
-
-  /*
-   * IMPORTANT :
-   * Pour le pairing code, Baileys demande
-   * un navigateur logique/valide.
-   */
-  const sock =
-    makeWASocket({
-      auth: state,
-
-      logger: P({
-        level:
-          process.env.LOG_LEVEL ||
-          "info"
-      }),
-
-      printQRInTerminal: false,
-
-      browser:
-        Browsers.macOS(
-          "Google Chrome"
-        ),
-
-      markOnlineOnConnect: false,
-
-      syncFullHistory: false,
-
-      connectTimeoutMs:
-        60000,
-
-      defaultQueryTimeoutMs:
-        60000,
-
-      keepAliveIntervalMs:
-        25000,
-
-      generateHighQualityLinkPreview:
-        false
-    });
-
-  const entry = {
-    sock,
-    phone,
-    status: "connecting",
-    code: null,
-    error: null
+async function sendText(
+  sock,
+  jid,
+  text,
+  mentions
+) {
+  const content = {
+    text
   };
-
-  sessions.set(
-    phone,
-    entry
-  );
-
-  /*
-   * Sauvegarde des credentials
-   */
-  sock.ev.on(
-    "creds.update",
-    saveCreds
-  );
-
-  /* =====================================================
-     PROMESSE DU PAIRING CODE
-
-     C'est LA correction importante.
-
-     createSession() ne retourne plus immédiatement
-     avec code:null.
-
-     Il attend réellement que Baileys fournisse
-     requestPairingCode().
-  ===================================================== */
-
-  let pairingPromiseResolve;
-  let pairingPromiseReject;
-
-  const pairingPromise =
-    new Promise(
-      (resolve, reject) => {
-        pairingPromiseResolve =
-          resolve;
-
-        pairingPromiseReject =
-          reject;
-      }
-    );
-
-  let pairingRequested = false;
-
-  /* =====================================================
-     CONNECTION UPDATE
-  ===================================================== */
-
-  sock.ev.on(
-    "connection.update",
-    async update => {
-      const {
-        connection,
-        lastDisconnect,
-        qr
-      } = update;
-
-      console.log(
-        `[HEXGATE] ${phone} connection.update:`,
-        connection || "pending",
-        qr ? "QR/EVENT" : ""
-      );
-
-      /*
-       * Pairing Code
-       *
-       * Baileys recommande de demander le code
-       * après le début de la connexion.
-       */
-      if (
-        !state.creds.registered &&
-        !pairingRequested &&
-        (
-          connection === "connecting" ||
-          !!qr
-        )
-      ) {
-        pairingRequested = true;
-
-        try {
-          const code =
-            await sock.requestPairingCode(
-              phone
-            );
-
-          if (!code) {
-            throw new Error(
-              "Baileys n'a retourné aucun Pairing Code."
-            );
-          }
-
-          entry.code = code;
-          entry.status =
-            "waiting_pairing";
-
-          console.log(
-            `[HEXGATE] Pairing code ${phone}: ${formatCode(code)}`
-          );
-
-          pairingPromiseResolve(
-            formatCode(code)
-          );
-        }
-
-        catch (error) {
-          entry.status =
-            "pairing_error";
-
-          entry.error =
-            error?.message ||
-            "Erreur Pairing Code";
-
-          pairingPromiseReject(
-            error
-          );
-
-          console.error(
-            "[HEXGATE] Pairing Code error:",
-            error
-          );
-        }
-      }
-
-      /* =================================================
-         CONNECTÉ
-      ================================================= */
-
-      if (
-        connection === "open"
-      ) {
-        entry.status =
-          "connected";
-
-        entry.code = null;
-        entry.error = null;
-
-        console.log(
-          `[HEXGATE] ${phone} CONNECTED`
-        );
-
-        /*
-         * Si le frontend attend encore le code
-         * mais que la session est déjà ouverte,
-         * on évite de bloquer la promesse.
-         */
-        if (!pairingRequested) {
-          pairingPromiseResolve(
-            null
-          );
-        }
-
-        /*
-         * Message automatique au numéro connecté.
-         */
-        try {
-          await sock.sendMessage(
-            `${phone}@s.whatsapp.net`,
-            {
-              text:
-                "🟢 *HEXGATE CONNECTÉ*\n\n" +
-                "Votre bot WhatsApp est maintenant connecté avec succès.\n\n" +
-                "Tapez *.menu* pour afficher les commandes."
-            }
-          );
-        }
-
-        catch (error) {
-          console.warn(
-            "[HEXGATE] Confirmation message error:",
-            error.message
-          );
-        }
-      }
-
-      /* =================================================
-         DÉCONNEXION
-      ================================================= */
-
-      if (
-        connection === "close"
-      ) {
-        const statusCode =
-          new Boom(
-            lastDisconnect?.error
-          )?.output
-            ?.statusCode;
-
-        console.log(
-          `[HEXGATE] ${phone} closed. Status:`,
-          statusCode
-        );
-
-        entry.status =
-          "disconnected";
-
-        entry.code = null;
-
-        /*
-         * Si le pairing est encore attendu,
-         * rejeter la promesse.
-         */
-        if (
-          !state.creds.registered &&
-          entry.status !==
-            "connected"
-        ) {
-          if (
-            !entry.error
-          ) {
-            entry.error =
-              `Connexion fermée (${statusCode || "inconnue"}).`;
-          }
-
-          try {
-            pairingPromiseReject(
-              new Error(
-                entry.error
-              )
-            );
-          }
-
-          catch {}
-        }
-
-        /*
-         * Compte déconnecté définitivement.
-         */
-        if (
-          statusCode ===
-          DisconnectReason.loggedOut
-        ) {
-          sessions.delete(
-            phone
-          );
-
-          console.log(
-            `[HEXGATE] ${phone} logged out`
-          );
-
-          return;
-        }
-
-        /*
-         * Reconnexion automatique.
-         */
-        sessions.delete(
-          phone
-        );
-
-        setTimeout(
-          () => {
-            createSession(
-              phone
-            ).catch(
-              error =>
-                console.error(
-                  "[HEXGATE] Reconnect error:",
-                  error.message
-                )
-            );
-          },
-          5000
-        );
-      }
-    }
-  );
-
-  /* =====================================================
-     ATTENDRE LE VRAI CODE
-  ===================================================== */
 
   if (
-    !state.creds.registered
+    Array.isArray(mentions) &&
+    mentions.length > 0
   ) {
-    try {
-      const code =
-        await Promise.race([
-          pairingPromise,
-
-          new Promise(
-            (_, reject) =>
-              setTimeout(
-                () =>
-                  reject(
-                    new Error(
-                      "Timeout : Baileys n'a pas fourni de Pairing Code."
-                    )
-                  ),
-                30000
-              )
-          )
-        ]);
-
-      return {
-        phone,
-        status:
-          entry.status,
-        code,
-        error:
-          entry.error
-      };
-    }
-
-    catch (error) {
-      return {
-        phone,
-        status:
-          entry.status ||
-          "pairing_error",
-        code: null,
-        error:
-          error.message
-      };
-    }
+    content.mentions =
+      mentions;
   }
 
-  /*
-   * Session déjà enregistrée.
-   */
-  return {
-    phone,
-    status:
-      entry.status,
-    code: null,
-    error: null
-  };
+  await sock.sendMessage(
+    jid,
+    content
+  );
 }
 
-/* =========================================================
-   MESSAGE EVENTS
-========================================================= */
+/* ============================================================
+   COMMAND HANDLER
+============================================================ */
+
+async function handleCommand(
+  phone,
+  sock,
+  message,
+  commandText
+) {
+  const jid =
+    message.key.remoteJid;
+
+  if (!jid) {
+    return;
+  }
+
+  const parts =
+    commandText
+      .trim()
+      .split(/\s+/);
+
+  const command =
+    (
+      parts[0] || ""
+    ).toLowerCase();
+
+  const argument =
+    (
+      parts[1] || ""
+    ).toLowerCase();
+
+  const config =
+    getConfig(phone);
+
+  let metadata = null;
+
+  if (
+    jid.endsWith("@g.us")
+  ) {
+    try {
+      metadata =
+        await sock.groupMetadata(
+          jid
+        );
+    } catch {}
+  }
+
+  const sender =
+    message.key.participant ||
+    jid;
+
+  const admin =
+    !metadata ||
+    isAdmin(
+      metadata,
+      sender
+    );
+
+  async function requireAdmin() {
+    if (admin) {
+      return true;
+    }
+
+    await sendText(
+      sock,
+      jid,
+      "⛔ Cette commande est réservée aux administrateurs."
+    );
+
+    return false;
+  }
+
+  /* ==========================================================
+     MENU
+  ========================================================== */
+
+  if (
+    command === ".menu"
+  ) {
+    await sendText(
+      sock,
+      jid,
+`╭━━━〔 ⚡ HEXGATE ⚡ 〕━━━╮
+┃      CYBERPUNK BOT
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
+🛡️ MODÉRATION
+
+.fakerecording on/off
+.antidelete on/off
+.antilink on/off
+.antispam on/off
+.welcome on/off
+
+👑 OUTILS
+
+.tagall
+.groupinfo
+.admins
+.ping
+.botstatus
+
+⚡ HEXGATE ONLINE`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     FAKE RECORDING
+  ========================================================== */
+
+  if (
+    command ===
+    ".fakerecording"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (
+      argument !== "on" &&
+      argument !== "off"
+    ) {
+      await sendText(
+        sock,
+        jid,
+        `🎙️ Usage : .fakerecording on/off\nÉtat actuel : ${config.fakeRecording ? "ON" : "OFF"}`
+      );
+
+      return;
+    }
+
+    config.fakeRecording =
+      argument === "on";
+
+    await sendText(
+      sock,
+      jid,
+      `🎙️ Fake Recording : ${config.fakeRecording ? "ON" : "OFF"}`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     ANTI DELETE
+  ========================================================== */
+
+  if (
+    command ===
+    ".antidelete"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (
+      argument !== "on" &&
+      argument !== "off"
+    ) {
+      await sendText(
+        sock,
+        jid,
+        `♻️ Usage : .antidelete on/off\nÉtat actuel : ${config.antiDelete ? "ON" : "OFF"}`
+      );
+
+      return;
+    }
+
+    config.antiDelete =
+      argument === "on";
+
+    await sendText(
+      sock,
+      jid,
+      `♻️ Anti-Delete : ${config.antiDelete ? "ON" : "OFF"}`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     ANTI LINK
+  ========================================================== */
+
+  if (
+    command === ".antilink"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (
+      argument !== "on" &&
+      argument !== "off"
+    ) {
+      await sendText(
+        sock,
+        jid,
+        `🔗 Usage : .antilink on/off\nÉtat actuel : ${config.antiLink ? "ON" : "OFF"}`
+      );
+
+      return;
+    }
+
+    config.antiLink =
+      argument === "on";
+
+    await sendText(
+      sock,
+      jid,
+      `🔗 Anti-Link : ${config.antiLink ? "ON" : "OFF"}`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     ANTI SPAM
+  ========================================================== */
+
+  if (
+    command === ".antispam"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (
+      argument !== "on" &&
+      argument !== "off"
+    ) {
+      await sendText(
+        sock,
+        jid,
+        `🛡️ Usage : .antispam on/off\nÉtat actuel : ${config.antiSpam ? "ON" : "OFF"}`
+      );
+
+      return;
+    }
+
+    config.antiSpam =
+      argument === "on";
+
+    await sendText(
+      sock,
+      jid,
+      `🛡️ Anti-Spam : ${config.antiSpam ? "ON" : "OFF"}`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     WELCOME
+  ========================================================== */
+
+  if (
+    command === ".welcome"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (
+      argument !== "on" &&
+      argument !== "off"
+    ) {
+      await sendText(
+        sock,
+        jid,
+        `👋 Usage : .welcome on/off\nÉtat actuel : ${config.welcome ? "ON" : "OFF"}`
+      );
+
+      return;
+    }
+
+    config.welcome =
+      argument === "on";
+
+    await sendText(
+      sock,
+      jid,
+      `👋 Welcome : ${config.welcome ? "ON" : "OFF"}`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     TAGALL
+  ========================================================== */
+
+  if (
+    command === ".tagall"
+  ) {
+    if (
+      !(await requireAdmin())
+    ) {
+      return;
+    }
+
+    if (!metadata) {
+      await sendText(
+        sock,
+        jid,
+        "⚠️ Cette commande fonctionne uniquement dans un groupe."
+      );
+
+      return;
+    }
+
+    const participants =
+      metadata.participants || [];
+
+    const mentions =
+      participants.map(
+        participant =>
+          participant.id
+      );
+
+    const text =
+      participants
+        .map(
+          participant =>
+            `@${participant.id.split("@")[0]}`
+        )
+        .join(" ");
+
+    await sendText(
+      sock,
+      jid,
+      `⚡ *HEXGATE TAGALL*\n\n${text}`,
+      mentions
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     GROUP INFO
+  ========================================================== */
+
+  if (
+    command === ".groupinfo"
+  ) {
+    if (!metadata) {
+      await sendText(
+        sock,
+        jid,
+        "⚠️ Cette commande fonctionne uniquement dans un groupe."
+      );
+
+      return;
+    }
+
+    await sendText(
+      sock,
+      jid,
+`╭━━〔 GROUP INFO 〕━━╮
+
+📌 Nom :
+${metadata.subject}
+
+👥 Membres :
+${metadata.participants.length}
+
+🤖 HEXGATE :
+ONLINE
+
+╰━━━━━━━━━━━━━━━━━━╯`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     ADMINS
+  ========================================================== */
+
+  if (
+    command === ".admins"
+  ) {
+    if (!metadata) {
+      await sendText(
+        sock,
+        jid,
+        "⚠️ Cette commande fonctionne uniquement dans un groupe."
+      );
+
+      return;
+    }
+
+    const admins =
+      metadata.participants.filter(
+        participant =>
+          participant.admin ===
+            "admin" ||
+          participant.admin ===
+            "superadmin"
+      );
+
+    const mentions =
+      admins.map(
+        participant =>
+          participant.id
+      );
+
+    const text =
+      admins
+        .map(
+          participant =>
+            `👑 @${participant.id.split("@")[0]}`
+        )
+        .join("\n");
+
+    await sendText(
+      sock,
+      jid,
+      `👑 *ADMINISTRATEURS*\n\n${text || "Aucun administrateur trouvé."}`,
+      mentions
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     PING
+  ========================================================== */
+
+  if (
+    command === ".ping"
+  ) {
+    const uptime =
+      Math.floor(
+        process.uptime()
+      );
+
+    await sendText(
+      sock,
+      jid,
+      `⚡ *PONG*\n\nHEXGATE : ONLINE\nUptime : ${uptime}s`
+    );
+
+    return;
+  }
+
+  /* ==========================================================
+     BOT STATUS
+  ========================================================== */
+
+  if (
+    command === ".botstatus"
+  ) {
+    await sendText(
+      sock,
+      jid,
+`╭━━〔 HEXGATE STATUS 〕━━╮
+
+🟢 WhatsApp : CONNECTED
+
+🔗 Anti-Link :
+${config.antiLink ? "ON" : "OFF"}
+
+♻️ Anti-Delete :
+${config.antiDelete ? "ON" : "OFF"}
+
+🛡️ Anti-Spam :
+${config.antiSpam ? "ON" : "OFF"}
+
+🎙️ Fake Recording :
+${config.fakeRecording ? "ON" : "OFF"}
+
+👋 Welcome :
+${config.welcome ? "ON" : "OFF"}
+
+⏱️ Uptime :
+${Math.floor(process.uptime())}s
+
+╰━━━━━━━━━━━━━━━━━━━━━━╯`
+    );
+
+    return;
+  }
+}
+
+/* ============================================================
+   MESSAGE HANDLERS
+============================================================ */
 
 function attachMessageHandlers(
   phone,
   sock
 ) {
+  const entry =
+    sessions.get(phone);
+
+  if (
+    entry?.messageHandlersAttached
+  ) {
+    return;
+  }
+
+  if (entry) {
+    entry.messageHandlersAttached =
+      true;
+  }
+
+  /* ==========================================================
+     NEW MESSAGES
+  ========================================================== */
+
   sock.ev.on(
     "messages.upsert",
     async ({
@@ -825,42 +1390,50 @@ function attachMessageHandlers(
       }
 
       for (
-        const msg of messages
+        const message of messages
       ) {
         try {
           if (
-            !msg.message ||
-            !msg.key?.remoteJid
+            !message?.message ||
+            !message?.key
           ) {
             continue;
           }
 
-          const cfg =
+          const jid =
+            message.key.remoteJid;
+
+          if (!jid) {
+            continue;
+          }
+
+          const config =
             getConfig(phone);
 
-          /*
-           * Anti-delete :
-           * archiver les messages reçus.
-           */
+          /* --------------------------------------------------
+             ARCHIVE POUR ANTI DELETE
+          -------------------------------------------------- */
+
           if (
-            !msg.key.fromMe &&
-            cfg.antiDelete
+            config.antiDelete &&
+            !message.key.fromMe
           ) {
-            await saveReceivedMessage(
+            await archiveMessage(
               phone,
-              msg
+              message
             );
           }
 
-          /*
-           * Commandes envoyées par le bot.
-           */
+          /* --------------------------------------------------
+             COMMANDES
+          -------------------------------------------------- */
+
           if (
-            msg.key.fromMe
+            message.key.fromMe
           ) {
             const text =
               extractText(
-                msg.message
+                message.message
               );
 
             if (
@@ -869,23 +1442,20 @@ function attachMessageHandlers(
               await handleCommand(
                 phone,
                 sock,
-                msg,
-                text,
-                cfg
+                message,
+                text
               );
             }
 
             continue;
           }
 
-          const jid =
-            msg.key.remoteJid;
+          /* --------------------------------------------------
+             FAKE RECORDING
+          -------------------------------------------------- */
 
-          /*
-           * Fake recording
-           */
           if (
-            cfg.fakeRecording
+            config.fakeRecording
           ) {
             try {
               await sock.sendPresenceUpdate(
@@ -894,48 +1464,47 @@ function attachMessageHandlers(
               );
 
               setTimeout(
-                () =>
-                  sock.sendPresenceUpdate(
-                    "paused",
-                    jid
-                  ).catch(() => {}),
+                async () => {
+                  try {
+                    await sock.sendPresenceUpdate(
+                      "paused",
+                      jid
+                    );
+                  } catch {}
+                },
                 2500
               );
-            }
-
-            catch {}
+            } catch {}
           }
 
-          /*
-           * Les règles de groupe commencent ici.
-           */
+          /* --------------------------------------------------
+             GROUP ONLY
+          -------------------------------------------------- */
+
           if (
-            !jid.endsWith(
-              "@g.us"
-            )
+            !jid.endsWith("@g.us")
           ) {
             continue;
           }
 
-          const text =
-            extractText(
-              msg.message
-            );
+          let metadata = null;
 
-          const metadata =
-            await sock
-              .groupMetadata(
+          try {
+            metadata =
+              await sock.groupMetadata(
                 jid
-              )
-              .catch(() => null);
+              );
+          } catch {
+            continue;
+          }
 
           if (!metadata) {
             continue;
           }
 
           const sender =
-            msg.key.participant ||
-            msg.key.remoteJid;
+            message.key.participant ||
+            jid;
 
           const admin =
             isAdmin(
@@ -943,522 +1512,770 @@ function attachMessageHandlers(
               sender
             );
 
-          /*
-           * Anti-link
-           */
-          if (
-            cfg.antiLink &&
-            isLink(text) &&
-            !admin
-          ) {
-            await sock.sendMessage(
-              jid,
-              {
-                delete:
-                  msg.key
-              }
+          const text =
+            extractText(
+              message.message
             );
 
-            await sock.sendMessage(
+          /* --------------------------------------------------
+             ANTI LINK
+          -------------------------------------------------- */
+
+          if (
+            config.antiLink &&
+            containsLink(text) &&
+            !admin
+          ) {
+            try {
+              await sock.sendMessage(
+                jid,
+                {
+                  delete:
+                    message.key
+                }
+              );
+            } catch {
+              /*
+               * Si WhatsApp refuse la suppression,
+               * on continue sans faire planter le bot.
+               */
+            }
+
+            await sendText(
+              sock,
               jid,
-              {
-                text:
-                  `🚫 @${sender.split("@")[0]} lien supprimé.`,
-                mentions: [
-                  sender
-                ]
-              }
+              `🚫 @${sender.split("@")[0]} lien supprimé.`,
+              [sender]
             );
 
             continue;
           }
 
-          /*
-           * Anti-spam simple.
-           */
+          /* --------------------------------------------------
+             ANTI SPAM
+          -------------------------------------------------- */
+
           if (
-            cfg.antiSpam &&
-            text.length > 1500 &&
-            !admin
+            config.antiSpam &&
+            !admin &&
+            text.length > 1500
           ) {
-            await sock.sendMessage(
-              jid,
-              {
-                delete:
-                  msg.key
-              }
-            );
+            try {
+              await sock.sendMessage(
+                jid,
+                {
+                  delete:
+                    message.key
+                }
+              );
+            } catch {}
 
             continue;
           }
-        }
-
-        catch (error) {
-          console.error(
-            "[HEXGATE] Message handler:",
-            error.message
+        } catch (error) {
+          logger.error(
+            {
+              error: error.message
+            },
+            "[HEXGATE] Message handler error"
           );
         }
       }
     }
   );
 
-  /*
-   * Suppression de message.
-   */
+  /* ==========================================================
+     MESSAGE DELETED
+  ========================================================== */
+
   sock.ev.on(
-    "messages.update",
-    async updates => {
-      const cfg =
-        getConfig(phone);
+    "messages.delete",
+    async event => {
+      try {
+        const config =
+          getConfig(phone);
 
-      if (
-        !cfg.antiDelete
-      ) {
-        return;
-      }
-
-      for (
-        const update of updates
-      ) {
-        try {
-          const protocol =
-            update.update
-              ?.message
-              ?.protocolMessage;
-
-          /*
-           * 0 = REVOKE dans les versions
-           * courantes utilisées ici.
-           */
-          if (
-            protocol?.type === 0
-          ) {
-            await restoreDeleted(
-              phone,
-              sock,
-              {
-                key: {
-                  remoteJid:
-                    update.key.remoteJid,
-
-                  id:
-                    protocol.key?.id ||
-                    update.key.id
-                }
-              }
-            );
-          }
+        if (
+          !config.antiDelete
+        ) {
+          return;
         }
 
-        catch (error) {
-          console.error(
-            "[HEXGATE] Anti-delete error:",
-            error.message
+        if (
+          !event ||
+          !event.keys
+        ) {
+          return;
+        }
+
+        for (
+          const key of event.keys
+        ) {
+          await restoreDeletedMessage(
+            phone,
+            sock,
+            key
           );
         }
+      } catch (error) {
+        logger.error(
+          {
+            error: error.message
+          },
+          "[HEXGATE] Delete event error"
+        );
+      }
+    }
+  );
+
+  /* ==========================================================
+     GROUP PARTICIPANTS
+  ========================================================== */
+
+  sock.ev.on(
+    "group-participants.update",
+    async update => {
+      try {
+        const config =
+          getConfig(phone);
+
+        if (
+          !config.welcome
+        ) {
+          return;
+        }
+
+        if (
+          update.action !== "add"
+        ) {
+          return;
+        }
+
+        const mentions =
+          update.participants || [];
+
+        if (
+          mentions.length === 0
+        ) {
+          return;
+        }
+
+        const text =
+          mentions
+            .map(
+              participant =>
+                `@${participant.split("@")[0]}`
+            )
+            .join(" ");
+
+        await sendText(
+          sock,
+          update.id,
+          `╭━━〔 ⚡ HEXGATE 〕━━╮\n\n👋 Bienvenue ${text} !\n\nBienvenue dans le groupe.\n\n╰━━━━━━━━━━━━━━━━━━╯`,
+          mentions
+        );
+      } catch (error) {
+        logger.error(
+          {
+            error: error.message
+          },
+          "[HEXGATE] Welcome error"
+        );
       }
     }
   );
 }
 
-/* =========================================================
-   COMMANDS
-========================================================= */
+/* ============================================================
+   START SESSION
+============================================================ */
 
-async function handleCommand(
-  phone,
-  sock,
-  msg,
-  raw,
-  cfg
+async function createSession(
+  phoneInput
 ) {
-  const jid =
-    msg.key.remoteJid;
-
-  const args =
-    raw
-      .trim()
-      .split(/\s+/);
-
-  const command =
-    args[0].toLowerCase();
-
-  const value =
-    args[1]?.toLowerCase();
-
-  const group =
-    jid.endsWith("@g.us")
-      ? await sock
-          .groupMetadata(jid)
-          .catch(() => null)
-      : null;
-
-  const sender =
-    msg.key.participant ||
-    msg.key.remoteJid;
-
-  const admin =
-    !group ||
-    isAdmin(
-      group,
-      sender
+  const phone =
+    normalizePhone(
+      phoneInput
     );
 
-  const requireAdmin =
-    async () => {
-      if (!admin) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              "⛔ Commande réservée aux administrateurs."
-          }
-        );
+  /* ----------------------------------------------------------
+     SESSION DÉJÀ ACTIVE
+  ---------------------------------------------------------- */
 
-        return false;
-      }
+  const existing =
+    sessions.get(phone);
 
-      return true;
+  if (existing) {
+    return {
+      ok: true,
+      phone,
+      status:
+        existing.status,
+      code:
+        existing.code || null,
+      error:
+        existing.error || null
     };
-
-  switch (command) {
-    case ".menu":
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-`╭━━━〔 ⚡ HEXGATE ⚡ 〕━━━╮
-┃     CYBERPUNK BOT
-╰━━━━━━━━━━━━━━━━━━━━━━╯
-
-🛡️ MODÉRATION
-
-• .fakerecording on/off
-• .antidelete on/off
-• .antilink on/off
-• .antispam on/off
-• .welcome on/off
-
-👑 OUTILS
-
-• .tagall
-• .groupinfo
-• .admins
-• .ping
-• .botstatus
-
-⚡ HEXGATE ONLINE`
-        }
-      );
-
-      break;
-
-    case ".fakerecording":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (
-        !["on", "off"]
-          .includes(value)
-      ) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `Usage : .fakerecording on/off\nÉtat : ${cfg.fakeRecording ? "ON" : "OFF"}`
-          }
-        );
-
-        return;
-      }
-
-      cfg.fakeRecording =
-        value === "on";
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `🎙️ Fake Recording : ${cfg.fakeRecording ? "ON" : "OFF"}`
-        }
-      );
-
-      break;
-
-    case ".antidelete":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (
-        !["on", "off"]
-          .includes(value)
-      ) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `Usage : .antidelete on/off\nÉtat : ${cfg.antiDelete ? "ON" : "OFF"}`
-          }
-        );
-
-        return;
-      }
-
-      cfg.antiDelete =
-        value === "on";
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `🧬 Anti-Delete : ${cfg.antiDelete ? "ON" : "OFF"}`
-        }
-      );
-
-      break;
-
-    case ".antilink":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (
-        !["on", "off"]
-          .includes(value)
-      ) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `Usage : .antilink on/off\nÉtat : ${cfg.antiLink ? "ON" : "OFF"}`
-          }
-        );
-
-        return;
-      }
-
-      cfg.antiLink =
-        value === "on";
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `🔗 Anti-Link : ${cfg.antiLink ? "ON" : "OFF"}`
-        }
-      );
-
-      break;
-
-    case ".antispam":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (
-        !["on", "off"]
-          .includes(value)
-      ) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `Usage : .antispam on/off\nÉtat : ${cfg.antiSpam ? "ON" : "OFF"}`
-          }
-        );
-
-        return;
-      }
-
-      cfg.antiSpam =
-        value === "on";
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `🛡️ Anti-Spam : ${cfg.antiSpam ? "ON" : "OFF"}`
-        }
-      );
-
-      break;
-
-    case ".welcome":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (
-        !["on", "off"]
-          .includes(value)
-      ) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `Usage : .welcome on/off\nÉtat : ${cfg.welcome ? "ON" : "OFF"}`
-          }
-        );
-
-        return;
-      }
-
-      cfg.welcome =
-        value === "on";
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `👋 Welcome : ${cfg.welcome ? "ON" : "OFF"}`
-        }
-      );
-
-      break;
-
-    case ".tagall":
-
-      if (
-        !(await requireAdmin())
-      ) return;
-
-      if (!group) {
-        return;
-      }
-
-      const mentions =
-        group.participants
-          .map(
-            p => p.id
-          );
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            "⚡ HEXGATE TAGALL\n\n" +
-            mentions
-              .map(
-                x =>
-                  `@${x.split("@")[0]}`
-              )
-              .join(" "),
-
-          mentions
-        }
-      );
-
-      break;
-
-    case ".groupinfo":
-
-      if (!group) {
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              "Cette commande doit être utilisée dans un groupe."
-          }
-        );
-
-        return;
-      }
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-`╭─〔 GROUP INFO 〕─╮
-Nom : ${group.subject}
-Membres : ${group.participants.length}
-HEXGATE : ${phone}`
-        }
-      );
-
-      break;
-
-    case ".admins":
-
-      if (!group) {
-        return;
-      }
-
-      const admins =
-        group.participants
-          .filter(
-            p =>
-              ["admin", "superadmin"]
-                .includes(p.admin)
-          );
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            "👑 ADMINS\n\n" +
-            admins
-              .map(
-                x =>
-                  `@${x.id.split("@")[0]}`
-              )
-              .join("\n"),
-
-          mentions:
-            admins.map(
-              x => x.id
-            )
-        }
-      );
-
-      break;
-
-    case ".ping":
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `⚡ PONG\nHEXGATE ONLINE\nUptime: ${Math.floor(process.uptime())}s`
-        }
-      );
-
-      break;
-
-    case ".botstatus":
-
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-`╭─〔 HEXGATE STATUS 〕─╮
-
-WhatsApp : CONNECTED
-Anti-Link : ${cfg.antiLink ? "ON" : "OFF"}
-Anti-Spam : ${cfg.antiSpam ? "ON" : "OFF"}
-Anti-Delete : ${cfg.antiDelete ? "ON" : "OFF"}
-Fake Recording : ${cfg.fakeRecording ? "ON" : "OFF"}
-Welcome : ${cfg.welcome ? "ON" : "OFF"}
-
-Uptime : ${Math.floor(process.uptime())}s`
-        }
-      );
-
-      break;
+  }
+
+  /* ----------------------------------------------------------
+     DÉMARRAGE DÉJÀ EN COURS
+  ---------------------------------------------------------- */
+
+  if (
+    startingSessions.has(phone)
+  ) {
+    return startingSessions.get(
+      phone
+    );
+  }
+
+  const startPromise =
+    startSessionInternal(
+      phone
+    );
+
+  startingSessions.set(
+    phone,
+    startPromise
+  );
+
+  try {
+    return await startPromise;
+  } finally {
+    startingSessions.delete(
+      phone
+    );
   }
 }
 
-/* =========================================================
-   STATUS
-========================================================= */
+/* ============================================================
+   INTERNAL SESSION START
+============================================================ */
+
+async function startSessionInternal(
+  phone
+) {
+  const authPath =
+    path.join(
+      SESSION_DIR,
+      phone
+    );
+
+  fs.mkdirSync(
+    authPath,
+    {
+      recursive: true
+    }
+  );
+
+  logger.info(
+    `[HEXGATE] Initialisation session ${phone}`
+  );
+
+  const {
+    state,
+    saveCreds
+  } =
+    await useMultiFileAuthState(
+      authPath
+    );
+
+  /* ----------------------------------------------------------
+     SOCKET
+  ---------------------------------------------------------- */
+
+  const sock =
+    makeWASocket({
+      auth: state,
+
+      logger,
+
+      printQRInTerminal: false,
+
+      /*
+       * IMPORTANT POUR LE PAIRING CODE
+       */
+      browser:
+        Browsers.macOS(
+          "Google Chrome"
+        ),
+
+      /*
+       * Ne pas forcer fetchLatestWaWebVersion.
+       */
+
+      markOnlineOnConnect:
+        false,
+
+      syncFullHistory:
+        false,
+
+      connectTimeoutMs:
+        60000,
+
+      defaultQueryTimeoutMs:
+        60000,
+
+      keepAliveIntervalMs:
+        25000
+    });
+
+  const entry = {
+    phone,
+    sock,
+
+    status:
+      state.creds.registered
+        ? "connecting"
+        : "waiting_pairing",
+
+    code: null,
+
+    error: null,
+
+    messageHandlersAttached:
+      false,
+
+    reconnecting:
+      false
+  };
+
+  sessions.set(
+    phone,
+    entry
+  );
+
+  /* ----------------------------------------------------------
+     SAVE CREDENTIALS
+  ---------------------------------------------------------- */
+
+  sock.ev.on(
+    "creds.update",
+    saveCreds
+  );
+
+  /* ----------------------------------------------------------
+     MESSAGE HANDLERS
+  ---------------------------------------------------------- */
+
+  attachMessageHandlers(
+    phone,
+    sock
+  );
+
+  /* ----------------------------------------------------------
+     PAIRING PROMISE
+  ---------------------------------------------------------- */
+
+  let pairingResolved =
+    false;
+
+  let pairingResolve;
+
+  let pairingReject;
+
+  const pairingPromise =
+    new Promise(
+      (resolve, reject) => {
+        pairingResolve =
+          resolve;
+
+        pairingReject =
+          reject;
+      }
+    );
+
+  let pairingRequested =
+    state.creds.registered;
+
+  /* ==========================================================
+     CONNECTION UPDATE
+  ========================================================== */
+
+  sock.ev.on(
+    "connection.update",
+    async update => {
+      try {
+        const {
+          connection,
+          lastDisconnect,
+          qr
+        } = update;
+
+        logger.info(
+          `[HEXGATE] ${phone} -> connection=${connection || "pending"}${qr ? " qr=true" : ""}`
+        );
+
+        /* ----------------------------------------------------
+           PAIRING CODE
+        ---------------------------------------------------- */
+
+        if (
+          !state.creds.registered &&
+          !pairingRequested &&
+          (
+            connection ===
+              "connecting" ||
+            Boolean(qr)
+          )
+        ) {
+          pairingRequested =
+            true;
+
+          try {
+            logger.info(
+              `[HEXGATE] Demande Pairing Code pour ${phone}`
+            );
+
+            const code =
+              await sock.requestPairingCode(
+                phone
+              );
+
+            const formatted =
+              formatPairingCode(
+                code
+              );
+
+            if (!formatted) {
+              throw new Error(
+                "Baileys a retourné un Pairing Code vide."
+              );
+            }
+
+            entry.code =
+              formatted;
+
+            entry.status =
+              "waiting_pairing";
+
+            entry.error =
+              null;
+
+            logger.info(
+              `[HEXGATE] Pairing Code ${phone}: ${formatted}`
+            );
+
+            if (
+              !pairingResolved
+            ) {
+              pairingResolved =
+                true;
+
+              pairingResolve(
+                formatted
+              );
+            }
+          } catch (error) {
+            entry.status =
+              "pairing_error";
+
+            entry.error =
+              error.message ||
+              "Erreur Pairing Code";
+
+            logger.error(
+              {
+                error:
+                  error.message
+              },
+              `[HEXGATE] Pairing Code error ${phone}`
+            );
+
+            if (
+              !pairingResolved
+            ) {
+              pairingResolved =
+                true;
+
+              pairingReject(
+                error
+              );
+            }
+          }
+        }
+
+        /* ----------------------------------------------------
+           CONNECTION OPEN
+        ---------------------------------------------------- */
+
+        if (
+          connection === "open"
+        ) {
+          entry.status =
+            "connected";
+
+          entry.error =
+            null;
+
+          entry.code =
+            null;
+
+          logger.info(
+            `[HEXGATE] 🟢 ${phone} CONNECTÉ`
+          );
+
+          /*
+           * Résout la promesse si une ancienne
+           * session était déjà enregistrée.
+           */
+
+          if (
+            !pairingResolved
+          ) {
+            pairingResolved =
+              true;
+
+            pairingResolve(
+              null
+            );
+          }
+
+          /*
+           * Message de confirmation
+           */
+
+          try {
+            await sock.sendMessage(
+              `${phone}@s.whatsapp.net`,
+              {
+                text:
+`🟢 *HEXGATE CONNECTÉ*
+
+Votre bot WhatsApp est maintenant connecté avec succès.
+
+Tapez *.menu* pour afficher les commandes.
+
+⚡ HEXGATE`
+              }
+            );
+          } catch (error) {
+            logger.warn(
+              {
+                error:
+                  error.message
+              },
+              "[HEXGATE] Message confirmation impossible"
+            );
+          }
+        }
+
+        /* ----------------------------------------------------
+           CONNECTION CLOSE
+        ---------------------------------------------------- */
+
+        if (
+          connection === "close"
+        ) {
+          const code =
+            getDisconnectCode(
+              lastDisconnect
+            );
+
+          logger.warn(
+            `[HEXGATE] ${phone} déconnecté. Code=${code || "unknown"}`
+          );
+
+          entry.status =
+            "disconnected";
+
+          entry.code =
+            null;
+
+          /*
+           * Logged out :
+           * ne pas recréer automatiquement.
+           */
+
+          if (
+            code ===
+            DisconnectReason.loggedOut
+          ) {
+            entry.status =
+              "logged_out";
+
+            sessions.delete(
+              phone
+            );
+
+            if (
+              !pairingResolved
+            ) {
+              pairingResolved =
+                true;
+
+              pairingReject(
+                new Error(
+                  "Le compte WhatsApp a été déconnecté."
+                )
+              );
+            }
+
+            return;
+          }
+
+          /*
+           * Pendant le premier pairing,
+           * une fermeture avant connexion doit
+           * être signalée au frontend.
+           */
+
+          if (
+            !state.creds.registered &&
+            !pairingResolved
+          ) {
+            pairingResolved =
+              true;
+
+            pairingReject(
+              new Error(
+                `WhatsApp a fermé la connexion avant le Pairing Code. Code=${code || "inconnu"}`
+              )
+            );
+
+            sessions.delete(
+              phone
+            );
+
+            return;
+          }
+
+          /*
+           * Reconnexion automatique
+           */
+
+          if (
+            !entry.reconnecting
+          ) {
+            entry.reconnecting =
+              true;
+
+            sessions.delete(
+              phone
+            );
+
+            setTimeout(
+              async () => {
+                try {
+                  await createSession(
+                    phone
+                  );
+                } catch (error) {
+                  logger.error(
+                    {
+                      error:
+                        error.message
+                    },
+                    `[HEXGATE] Reconnexion échouée ${phone}`
+                  );
+                }
+              },
+              code ===
+                DisconnectReason.restartRequired
+                ? 1000
+                : 5000
+            );
+          }
+        }
+      } catch (error) {
+        logger.error(
+          {
+            error:
+              error.message
+          },
+          "[HEXGATE] connection.update error"
+        );
+      }
+    }
+  );
+
+  /* ==========================================================
+     SESSION DÉJÀ ENREGISTRÉE
+  ========================================================== */
+
+  if (
+    state.creds.registered
+  ) {
+    return {
+      ok: true,
+
+      phone,
+
+      status:
+        "connecting",
+
+      code: null,
+
+      error: null
+    };
+  }
+
+  /* ==========================================================
+     ATTENDRE LE VRAI PAIRING CODE
+  ========================================================== */
+
+  try {
+    const code =
+      await Promise.race([
+        pairingPromise,
+
+        new Promise(
+          (_, reject) => {
+            setTimeout(
+              () => {
+                reject(
+                  new Error(
+                    "Timeout : aucun Pairing Code n'a été fourni par Baileys après 30 secondes."
+                  )
+                );
+              },
+              30000
+            );
+          }
+        )
+      ]);
+
+    return {
+      ok: true,
+
+      phone,
+
+      status:
+        entry.status,
+
+      code:
+        code || null,
+
+      error:
+        entry.error || null
+    };
+  } catch (error) {
+    entry.status =
+      "pairing_error";
+
+    entry.error =
+      error.message;
+
+    return {
+      ok: false,
+
+      phone,
+
+      status:
+        "pairing_error",
+
+      code: null,
+
+      error:
+        error.message
+    };
+  }
+}
+
+/* ============================================================
+   SESSION STATUS
+============================================================ */
 
 async function getSessionStatus(
   phoneInput
@@ -1474,50 +2291,58 @@ async function getSessionStatus(
   if (entry) {
     return {
       ok: true,
+
       phone,
+
       status:
         entry.status,
+
       code:
-        entry.code
-          ? formatCode(entry.code)
-          : null,
+        entry.code || null,
+
       error:
-        entry.error ||
-        null
+        entry.error || null
     };
   }
 
   const authPath =
     path.join(
-      BASE,
+      SESSION_DIR,
       phone
+    );
+
+  const credsPath =
+    path.join(
+      authPath,
+      "creds.json"
     );
 
   return {
     ok: true,
+
     phone,
+
     status:
       fs.existsSync(
-        path.join(
-          authPath,
-          "creds.json"
-        )
+        credsPath
       )
         ? "saved_session"
         : "not_found",
+
     code: null,
+
     error: null
   };
 }
 
-/* =========================================================
+/* ============================================================
    LIST SESSIONS
-========================================================= */
+============================================================ */
 
 function listSessions() {
-  return [
-    ...sessions.values()
-  ].map(
+  return Array.from(
+    sessions.values()
+  ).map(
     entry => ({
       phone:
         entry.phone,
@@ -1526,20 +2351,17 @@ function listSessions() {
         entry.status,
 
       code:
-        entry.code
-          ? formatCode(entry.code)
-          : null,
+        entry.code || null,
 
       error:
-        entry.error ||
-        null
+        entry.error || null
     })
   );
 }
 
-/* =========================================================
+/* ============================================================
    LOGOUT
-========================================================= */
+============================================================ */
 
 async function logoutSession(
   phoneInput
@@ -1552,83 +2374,63 @@ async function logoutSession(
   const entry =
     sessions.get(phone);
 
-  if (!entry) {
-    return;
+  if (entry) {
+    try {
+      await entry.sock.logout();
+    } catch {}
   }
-
-  try {
-    await entry.sock.logout();
-  }
-
-  catch {}
 
   sessions.delete(
     phone
   );
-}
 
-/* =========================================================
-   STARTUP MESSAGE HANDLERS
-========================================================= */
+  /*
+   * Suppression de la session locale.
+   */
 
-function attachHandlersToExistingSessions() {
-  for (
-    const entry of sessions.values()
-  ) {
-    attachMessageHandlers(
-      entry.phone,
-      entry.sock
-    );
-  }
-}
-
-/*
- * Les handlers doivent être attachés après création.
- * On surcharge createSession ici pour garantir cela.
- */
-const originalCreateSession =
-  createSession;
-
-async function createSessionWithHandlers(
-  phone
-) {
-  const result =
-    await originalCreateSession(
+  const authPath =
+    path.join(
+      SESSION_DIR,
       phone
     );
 
-  const normalized =
-    normalizePhone(
-      phone
-    );
-
-  const entry =
-    sessions.get(
-      normalized
-    );
-
-  if (
-    entry &&
-    !entry.handlersAttached
-  ) {
-    entry.handlersAttached = true;
-
-    attachMessageHandlers(
-      normalized,
-      entry.sock
+  try {
+    if (
+      fs.existsSync(
+        authPath
+      )
+    ) {
+      fs.rmSync(
+        authPath,
+        {
+          recursive: true,
+          force: true
+        }
+      );
+    }
+  } catch (error) {
+    logger.warn(
+      {
+        error:
+          error.message
+      },
+      "[HEXGATE] Impossible de supprimer session"
     );
   }
 
-  return result;
+  return {
+    ok: true,
+    phone
+  };
 }
+
+/* ============================================================
+   EXPORTS
+============================================================ */
 
 module.exports = {
-  createSession:
-    createSessionWithHandlers,
-
+  createSession,
   getSessionStatus,
-
   listSessions,
-
   logoutSession
 };
