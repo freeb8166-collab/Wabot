@@ -1,0 +1,22 @@
+{
+  "name": "hexgate",
+  "version": "2.0.0",
+  "private": true,
+  "description": "HEXGATE - Cyberpunk WhatsApp pairing and group moderation dashboard",
+  "main": "backend/src/index.js",
+  "scripts": {
+    "start": "node backend/src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "6.7.23",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "libphonenumber-js": "^1.12.24",
+    "pino": "^9.6.0"
+  }
+}
