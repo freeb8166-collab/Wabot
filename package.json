@@ -1,0 +1,14 @@
+{
+  "name":"hexgate","version":"3.0.0","private":true,
+  "description":"HEXGATE WhatsApp pairing and automation panel powered by Baileys",
+  "main":"server.js","type":"commonjs",
+  "scripts":{"start":"node server.js","dev":"node server.js"},
+  "engines":{"node":"22.22.0"},
+  "dependencies":{
+    "@hapi/boom":"^10.0.1",
+    "@whiskeysockets/baileys":"6.7.23",
+    "cors":"^2.8.5",
+    "express":"^5.1.0",
+    "pino":"^9.9.0"
+  }
+}
